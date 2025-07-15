@@ -1,0 +1,211 @@
+import os
+import requests
+import json
+
+# --- Configuração Essencial ---
+# Configure suas chaves e a URL base interna do Datadog como variáveis de ambiente.
+# Este é o método mais seguro e recomendado.
+#
+# NO LINUX/MACOS:
+# export DD_API_KEY='sua_api_key_aqui'
+# export DD_APP_KEY='sua_app_key_aqui'
+# export DD_BASE_URL='https://datadog.suaempresa.com' # <-- COLOQUE SEU ENDEREÇO INTERNO AQUI
+#
+# NO WINDOWS (PowerShell):
+# $env:DD_API_KEY='sua_api_key_aqui'
+# $env:DD_APP_KEY='sua_app_key_aqui'
+# $env:DD_BASE_URL='https://datadog.suaempresa.com' # <-- COLOQUE SEU ENDEREÇO INTERNO AQUI
+
+DD_API_KEY = os.getenv("DD_API_KEY")
+DD_APP_KEY = os.getenv("DD_APP_KEY")
+DD_BASE_URL = os.getenv("DD_BASE_URL")
+
+# --- Funções da API Datadog ---
+
+def get_all_apm_services(api_key: str, app_key: str, base_url: str) -> list:
+    """
+    Busca todos os serviços do APM usando a URL base fornecida.
+    """
+    services = []
+    page_number = 0
+    # O endpoint da API permanece o mesmo, apenas a base da URL muda.
+    url = f"{base_url}/api/v2/services"
+    headers = {
+        "Accept": "application/json",
+        "DD-API-KEY": api_key,
+        "DD-APPLICATION-KEY": app_key,
+    }
+
+    print("Buscando todos os serviços do APM...")
+    while True:
+        try:
+            params = {"page[number]": page_number}
+            response = requests.get(url, headers=headers, params=params)
+            response.raise_for_status()  # Lança erro para status 4xx/5xx
+
+            data = response.json()
+            page_services = data.get("data", [])
+            if not page_services:
+                break # Encerra o loop se não houver mais dados na página
+
+            services.extend(page_services)
+            page_number += 1
+
+        except requests.exceptions.HTTPError as http_err:
+            print(f"--- ERRO HTTP ao buscar serviços: {http_err} ---")
+            if response.status_code == 403:
+                print("--- ERRO 403 (Forbidden): Verifique se sua API Key e App Key estão corretas e têm as permissões necessárias. ---")
+            print(f"Resposta da API: {response.text}")
+            return [] # Retorna lista vazia em caso de erro
+        except requests.exceptions.RequestException as err:
+            print(f"Erro de requisição ao buscar serviços: {err}")
+            return []
+
+    print(f"Encontrados {len(services)} serviços no total.")
+    return services
+
+
+def get_all_monitors(api_key: str, app_key: str, base_url: str) -> list:
+    """
+    Busca todos os monitores usando a URL base fornecida.
+    """
+    monitors = []
+    page = 0
+    page_size = 100
+    url = f"{base_url}/api/v1/monitor"
+    headers = {
+        "Accept": "application/json",
+        "DD-API-KEY": api_key,
+        "DD-APPLICATION-KEY": app_key,
+    }
+
+    print("\nBuscando todos os monitores...")
+    while True:
+        try:
+            params = {"page": page, "page_size": page_size, "with_downtimes": "false"}
+            response = requests.get(url, headers=headers, params=params)
+            response.raise_for_status()
+
+            data = response.json()
+            if not data:
+                break
+
+            monitors.extend(data)
+            print(f"  - Buscados {len(monitors)} monitores até agora...")
+            page += 1
+
+        except requests.exceptions.HTTPError as http_err:
+            print(f"--- ERRO HTTP ao buscar monitores: {http_err} ---")
+            if response.status_code == 403:
+                print("--- ERRO 403 (Forbidden): Verifique se sua API Key e App Key estão corretas e têm as permissões necessárias. ---")
+            print(f"Resposta da API: {response.text}")
+            return []
+        except requests.exceptions.RequestException as err:
+            print(f"Erro de requisição ao buscar monitores: {err}")
+            return []
+    
+    print(f"Total de {len(monitors)} monitores encontrados.")
+    return monitors
+
+
+def filter_services_by_sigla(services: list) -> list:
+    """
+    Filtra uma lista de serviços para incluir apenas aqueles que possuem a tag 'sigla' com um valor.
+    """
+    filtered_services = []
+    print("\nFiltrando serviços que possuem a tag 'sigla'...")
+    for service in services:
+        # As tags estão em attributes -> tags para a API v2
+        tags = service.get("attributes", {}).get("tags", [])
+        if not tags:
+            continue
+
+        for tag in tags:
+            # Verifica se a tag é 'sigla' e se tem um valor (ex: 'sigla:meu-app')
+            # A verificação garante que a tag começa com 'sigla:' e que há algo depois dos dois pontos.
+            if tag.lower().startswith("sigla:") and len(tag.split(':', 1)) > 1 and tag.split(':', 1)[1]:
+                filtered_services.append(service)
+                # Uma vez que encontramos a tag, não precisamos verificar as outras neste serviço
+                break
+    
+    print(f"Encontrados {len(filtered_services)} serviços com a tag 'sigla' preenchida.")
+    return filtered_services
+
+
+def map_services_to_monitors(services: list, monitors: list) -> dict:
+    """
+    Mapeia serviços para os monitores que os referenciam na query ou mensagem.
+    """
+    service_monitor_map = {}
+    print("\nIniciando o mapeamento de serviços para monitores...")
+
+    for service in services:
+        service_name = service.get("attributes", {}).get("name")
+        if not service_name:
+            continue
+
+        service_monitor_map[service_name] = []
+        search_terms = [f"service:{service_name}", service_name]
+
+        for monitor in monitors:
+            monitor_name = monitor.get("name", "Nome Desconhecido")
+            monitor_query = monitor.get("query", "").lower()
+            monitor_message = monitor.get("message", "").lower()
+
+            for term in search_terms:
+                if term.lower() in monitor_query or term.lower() in monitor_message:
+                    service_monitor_map[service_name].append(monitor_name)
+                    break
+    
+    print("Mapeamento concluído.")
+    return service_monitor_map
+
+
+def main():
+    """
+    Função principal para executar o script.
+    """
+    if not all([DD_API_KEY, DD_APP_KEY, DD_BASE_URL]):
+        print("="*60)
+        print("ERRO: Uma ou mais variáveis de ambiente não foram definidas.")
+        print("Por favor, configure DD_API_KEY, DD_APP_KEY e DD_BASE_URL.")
+        print("Exemplo: DD_BASE_URL='https://datadog.suaempresa.com'")
+        print("="*60)
+        return
+
+    # 1. Buscar todos os serviços
+    all_apm_services = get_all_apm_services(DD_API_KEY, DD_APP_KEY, DD_BASE_URL)
+    if not all_apm_services:
+        print("\nNão foi possível buscar serviços. Encerrando.")
+        return
+
+    # 2. Filtrar serviços que possuem a tag 'sigla' com valor
+    filtered_apm_services = filter_services_by_sigla(all_apm_services)
+    if not filtered_apm_services:
+        print("\nNenhum serviço com a tag 'sigla' preenchida foi encontrado. Encerrando.")
+        return
+        
+    # 3. Buscar todos os monitores
+    all_monitors = get_all_monitors(DD_API_KEY, DD_APP_KEY, DD_BASE_URL)
+    if not all_monitors:
+        print("\nNão foi possível buscar monitores. Encerrando.")
+        return
+
+    # 4. Mapear os serviços JÁ FILTRADOS para os monitores
+    service_map = map_services_to_monitors(filtered_apm_services, all_monitors)
+
+    # 5. Exibir os resultados
+    print("\n" + "="*20 + " Resultado do Mapeamento " + "="*20)
+    for service, monitors in sorted(service_map.items()):
+        print(f"\n✅ Serviço: {service}")
+        if monitors:
+            for monitor in sorted(monitors):
+                print(f"  - Monitor: {monitor}")
+        else:
+            print("  (Nenhum monitor associado encontrado)")
+    
+    print("\n--- Fim do Relatório ---")
+
+
+if __name__ == "__main__":
+    main()
