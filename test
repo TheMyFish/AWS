@@ -1,211 +1,171 @@
-import os
-import requests
 import json
+import os
 
-# --- Configuração Essencial ---
-# Configure suas chaves e a URL base interna do Datadog como variáveis de ambiente.
-# Este é o método mais seguro e recomendado.
+# ==============================================================================
+# ÁREA DE CONFIGURAÇÃO - EDITE APENAS AQUI
+# ==============================================================================
+# Adicione ou remova dicionários desta lista para gerar os monitores.
 #
-# NO LINUX/MACOS:
-# export DD_API_KEY='sua_api_key_aqui'
-# export DD_APP_KEY='sua_app_key_aqui'
-# export DD_BASE_URL='https://datadog.suaempresa.com' # <-- COLOQUE SEU ENDEREÇO INTERNO AQUI
+# Parâmetros:
+#   'app_name': (Obrigatório) O nome da aplicação. Será usado nas tags e nomes.
+#   'env':      (Obrigatório) O ambiente (ex: "production", "staging").
 #
-# NO WINDOWS (PowerShell):
-# $env:DD_API_KEY='sua_api_key_aqui'
-# $env:DD_APP_KEY='sua_app_key_aqui'
-# $env:DD_BASE_URL='https://datadog.suaempresa.com' # <-- COLOQUE SEU ENDEREÇO INTERNO AQUI
-
-DD_API_KEY = os.getenv("DD_API_KEY")
-DD_APP_KEY = os.getenv("DD_APP_KEY")
-DD_BASE_URL = os.getenv("DD_BASE_URL")
-
-# --- Funções da API Datadog ---
-
-def get_all_apm_services(api_key: str, app_key: str, base_url: str) -> list:
-    """
-    Busca todos os serviços do APM usando a URL base fornecida.
-    """
-    services = []
-    page_number = 0
-    # O endpoint da API permanece o mesmo, apenas a base da URL muda.
-    url = f"{base_url}/api/v2/services"
-    headers = {
-        "Accept": "application/json",
-        "DD-API-KEY": api_key,
-        "DD-APPLICATION-KEY": app_key,
+# Parâmetros Opcionais (sobrescrevem os padrões):
+#   'notification_channel': Canal para alertas (ex: "@slack-sua-equipe").
+#   'latency_warning':      Threshold de warning para latência em ms.
+#   'latency_critical':     Threshold crítico para latência em ms.
+#   'error_rate_warning':   Threshold de warning para taxa de erro em %.
+#   'error_rate_critical':  Threshold crítico para taxa de erro em %.
+#   'cpu_warning':          Threshold de warning para CPU em %.
+#   'cpu_critical':         Threshold crítico para CPU em %.
+#   'memory_warning':       Threshold de warning para memória em %.
+#   'memory_critical':      Threshold crítico para memória em %.
+#
+APPLICATIONS_TO_MONITOR = [
+    {
+        "app_name": "servico-de-pagamentos",
+        "env": "production",
+        "notification_channel": "@pagerduty-critical-payments",
+        "latency_critical": 1000,
+        "error_rate_critical": 5
+    },
+    {
+        "app_name": "api-de-clientes",
+        "env": "production",
+        "notification_channel": "@slack-equipe-core"
+    },
+    {
+        "app_name": "servico-de-notificacoes",
+        "env": "staging",
+        "cpu_warning": 70, # Thresholds mais baixos para staging
+        "cpu_critical": 80
+    },
+    {
+        "app_name": "frontend-webapp",
+        "env": "production"
+        # Este usará todos os valores padrão
     }
-
-    print("Buscando todos os serviços do APM...")
-    while True:
-        try:
-            params = {"page[number]": page_number}
-            response = requests.get(url, headers=headers, params=params)
-            response.raise_for_status()  # Lança erro para status 4xx/5xx
-
-            data = response.json()
-            page_services = data.get("data", [])
-            if not page_services:
-                break # Encerra o loop se não houver mais dados na página
-
-            services.extend(page_services)
-            page_number += 1
-
-        except requests.exceptions.HTTPError as http_err:
-            print(f"--- ERRO HTTP ao buscar serviços: {http_err} ---")
-            if response.status_code == 403:
-                print("--- ERRO 403 (Forbidden): Verifique se sua API Key e App Key estão corretas e têm as permissões necessárias. ---")
-            print(f"Resposta da API: {response.text}")
-            return [] # Retorna lista vazia em caso de erro
-        except requests.exceptions.RequestException as err:
-            print(f"Erro de requisição ao buscar serviços: {err}")
-            return []
-
-    print(f"Encontrados {len(services)} serviços no total.")
-    return services
+]
+# ==============================================================================
+# FIM DA ÁREA DE CONFIGURAÇÃO
+# ==============================================================================
 
 
-def get_all_monitors(api_key: str, app_key: str, base_url: str) -> list:
+def get_monitor_definitions(config):
     """
-    Busca todos os monitores usando a URL base fornecida.
+    Cria uma lista de definições de monitores JSON com base na configuração fornecida.
     """
-    monitors = []
-    page = 0
-    page_size = 100
-    url = f"{base_url}/api/v1/monitor"
-    headers = {
-        "Accept": "application/json",
-        "DD-API-KEY": api_key,
-        "DD-APPLICATION-KEY": app_key,
-    }
-
-    print("\nBuscando todos os monitores...")
-    while True:
-        try:
-            params = {"page": page, "page_size": page_size, "with_downtimes": "false"}
-            response = requests.get(url, headers=headers, params=params)
-            response.raise_for_status()
-
-            data = response.json()
-            if not data:
-                break
-
-            monitors.extend(data)
-            print(f"  - Buscados {len(monitors)} monitores até agora...")
-            page += 1
-
-        except requests.exceptions.HTTPError as http_err:
-            print(f"--- ERRO HTTP ao buscar monitores: {http_err} ---")
-            if response.status_code == 403:
-                print("--- ERRO 403 (Forbidden): Verifique se sua API Key e App Key estão corretas e têm as permissões necessárias. ---")
-            print(f"Resposta da API: {response.text}")
-            return []
-        except requests.exceptions.RequestException as err:
-            print(f"Erro de requisição ao buscar monitores: {err}")
-            return []
+    app_name = config["app_name"]
+    env = config["env"]
     
-    print(f"Total de {len(monitors)} monitores encontrados.")
+    # --- Valores Padrão ---
+    defaults = {
+        "notification_channel": "@slack-alertas-gerais",
+        "latency_warning": 500,
+        "latency_critical": 800,
+        "error_rate_warning": 5,
+        "error_rate_critical": 10,
+        "cpu_warning": 80,
+        "cpu_critical": 90,
+        "memory_warning": 85,
+        "memory_critical": 95
+    }
+    
+    # Mescla a configuração específica com os padrões. A config do usuário tem prioridade.
+    conf = {**defaults, **config}
+
+    tags = [f"app:{app_name}", f"env:{env}", "managed_by:script"]
+    message_suffix = f"Verifique a aplicação {app_name} no ambiente {env}. {conf['notification_channel']}"
+
+    # Template base para todos os monitores
+    base_monitor = {
+        "tags": tags,
+        "options": {
+            "notify_audit": False,
+            "locked": False,
+            "timeout_h": 0,
+            "new_host_delay": 300,
+            "require_full_window": True,
+            "notify_no_data": False,
+            "renotify_interval": 0,
+            "escalation_message": ""
+        }
+    }
+
+    # Definições dos monitores
+    monitors = [
+        {
+            **base_monitor,
+            "name": f"[{app_name.upper()}] Alta Latência P95 ({env})",
+            "type": "metric alert",
+            "query": f"p95(last_5m):avg:trace.http.request.duration{{env:{env},service:{app_name}}} by {{host}} > {conf['latency_warning']}",
+            "message": f"A latência p95 está acima de {{value}}ms. {message_suffix}",
+            "options": {**base_monitor["options"], "thresholds": {"warning": conf['latency_warning'], "critical": conf['latency_critical']}}
+        },
+        {
+            **base_monitor,
+            "name": f"[{app_name.upper( )}] Alta Taxa de Erros ({env})",
+            "type": "metric alert",
+            "query": f"sum(last_5m):sum:trace.http.request.hits{{env:{env},service:{app_name},status_code:5*}}.as_count( ) / sum:trace.http.request.hits{{env:{env},service:{app_name}}}.as_count( ) * 100 > {conf['error_rate_warning']}",
+            "message": f"A taxa de erros está em {{value}}%. {message_suffix}",
+            "options": {**base_monitor["options"], "thresholds": {"warning": conf['error_rate_warning'], "critical": conf['error_rate_critical']}}
+        },
+        {
+            **base_monitor,
+            "name": f"[{app_name.upper()}] Saturação de CPU Fargate ({env})",
+            "type": "metric alert",
+            "query": f"avg(last_5m):avg:ecs.fargate.cpu.user{{env:{env},task_family:{app_name}}} by {{task_arn}} > {conf['cpu_warning']}",
+            "message": f"A utilização de CPU está em {{value}}%. {message_suffix}",
+            "options": {**base_monitor["options"], "thresholds": {"warning": conf['cpu_warning'], "critical": conf['cpu_critical']}}
+        },
+        {
+            **base_monitor,
+            "name": f"[{app_name.upper()}] Saturação de Memória ECS ({env})",
+            "type": "metric alert",
+            "query": f"avg(last_5m):avg:aws.ecs.memory_utilization{{env:{env},servicename:{app_name}}} by {{clustername}} > {conf['memory_warning']}",
+            "message": f"A utilização de memória está em {{value}}%. {message_suffix}",
+            "options": {**base_monitor["options"], "thresholds": {"warning": conf['memory_warning'], "critical": conf['memory_critical']}}
+        }
+    ]
+    
     return monitors
 
-
-def filter_services_by_sigla(services: list) -> list:
-    """
-    Filtra uma lista de serviços para incluir apenas aqueles que possuem a tag 'sigla' com um valor.
-    """
-    filtered_services = []
-    print("\nFiltrando serviços que possuem a tag 'sigla'...")
-    for service in services:
-        # As tags estão em attributes -> tags para a API v2
-        tags = service.get("attributes", {}).get("tags", [])
-        if not tags:
-            continue
-
-        for tag in tags:
-            # Verifica se a tag é 'sigla' e se tem um valor (ex: 'sigla:meu-app')
-            # A verificação garante que a tag começa com 'sigla:' e que há algo depois dos dois pontos.
-            if tag.lower().startswith("sigla:") and len(tag.split(':', 1)) > 1 and tag.split(':', 1)[1]:
-                filtered_services.append(service)
-                # Uma vez que encontramos a tag, não precisamos verificar as outras neste serviço
-                break
-    
-    print(f"Encontrados {len(filtered_services)} serviços com a tag 'sigla' preenchida.")
-    return filtered_services
-
-
-def map_services_to_monitors(services: list, monitors: list) -> dict:
-    """
-    Mapeia serviços para os monitores que os referenciam na query ou mensagem.
-    """
-    service_monitor_map = {}
-    print("\nIniciando o mapeamento de serviços para monitores...")
-
-    for service in services:
-        service_name = service.get("attributes", {}).get("name")
-        if not service_name:
-            continue
-
-        service_monitor_map[service_name] = []
-        search_terms = [f"service:{service_name}", service_name]
-
-        for monitor in monitors:
-            monitor_name = monitor.get("name", "Nome Desconhecido")
-            monitor_query = monitor.get("query", "").lower()
-            monitor_message = monitor.get("message", "").lower()
-
-            for term in search_terms:
-                if term.lower() in monitor_query or term.lower() in monitor_message:
-                    service_monitor_map[service_name].append(monitor_name)
-                    break
-    
-    print("Mapeamento concluído.")
-    return service_monitor_map
-
-
 def main():
-    """
-    Função principal para executar o script.
-    """
-    if not all([DD_API_KEY, DD_APP_KEY, DD_BASE_URL]):
-        print("="*60)
-        print("ERRO: Uma ou mais variáveis de ambiente não foram definidas.")
-        print("Por favor, configure DD_API_KEY, DD_APP_KEY e DD_BASE_URL.")
-        print("Exemplo: DD_BASE_URL='https://datadog.suaempresa.com'")
-        print("="*60)
-        return
-
-    # 1. Buscar todos os serviços
-    all_apm_services = get_all_apm_services(DD_API_KEY, DD_APP_KEY, DD_BASE_URL)
-    if not all_apm_services:
-        print("\nNão foi possível buscar serviços. Encerrando.")
-        return
-
-    # 2. Filtrar serviços que possuem a tag 'sigla' com valor
-    filtered_apm_services = filter_services_by_sigla(all_apm_services)
-    if not filtered_apm_services:
-        print("\nNenhum serviço com a tag 'sigla' preenchida foi encontrado. Encerrando.")
-        return
-        
-    # 3. Buscar todos os monitores
-    all_monitors = get_all_monitors(DD_API_KEY, DD_APP_KEY, DD_BASE_URL)
-    if not all_monitors:
-        print("\nNão foi possível buscar monitores. Encerrando.")
-        return
-
-    # 4. Mapear os serviços JÁ FILTRADOS para os monitores
-    service_map = map_services_to_monitors(filtered_apm_services, all_monitors)
-
-    # 5. Exibir os resultados
-    print("\n" + "="*20 + " Resultado do Mapeamento " + "="*20)
-    for service, monitors in sorted(service_map.items()):
-        print(f"\n✅ Serviço: {service}")
-        if monitors:
-            for monitor in sorted(monitors):
-                print(f"  - Monitor: {monitor}")
-        else:
-            print("  (Nenhum monitor associado encontrado)")
+    """Função principal que lê a configuração e gera os arquivos JSON."""
+    print("--- Iniciando geração de JSON para monitores Datadog ---")
     
-    print("\n--- Fim do Relatório ---")
+    output_dir = "monitores_json_gerados"
+    os.makedirs(output_dir, exist_ok=True)
+    
+    if not APPLICATIONS_TO_MONITOR:
+        print("AVISO: A lista 'APPLICATIONS_TO_MONITOR' está vazia. Nenhum arquivo será gerado.")
+        return
 
+    for app_config in APPLICATIONS_TO_MONITOR:
+        app_name = app_config.get("app_name")
+        env = app_config.get("env")
+
+        if not app_name or not env:
+            print(f"ERRO: Configuração inválida, 'app_name' e 'env' são obrigatórios. Ignorando item: {app_config}")
+            continue
+
+        print(f"Processando: {app_name} no ambiente {env}...")
+        
+        # Gera a lista de monitores para a aplicação atual
+        all_monitors_for_app = get_monitor_definitions(app_config)
+        
+        # Define o nome do arquivo de saída
+        output_filename = os.path.join(output_dir, f"{app_name}-{env}-monitors.json")
+
+        # Escreve a lista de monitores no arquivo JSON
+        try:
+            with open(output_filename, 'w', encoding='utf-8') as f:
+                json.dump(all_monitors_for_app, f, indent=4, ensure_ascii=False)
+            print(f"  -> ✅ Arquivo gerado com sucesso em: {output_filename}")
+        except IOError as e:
+            print(f"  -> ❌ ERRO ao escrever o arquivo para {app_name}: {e}")
+
+    print("\n--- Geração concluída! ---")
 
 if __name__ == "__main__":
     main()
